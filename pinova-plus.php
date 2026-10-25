@@ -45,7 +45,7 @@ add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function( arra
  */
 add_filter( 'plugin_row_meta', function( array $links, string $file ) {
     if ( $file === plugin_basename( __FILE__ ) ) {
-        $links[] = '<a href="https://webinew.com/webdesign/" target="_blank" style="color:#7c3aed;">' . __( 'طراحی سایت وبینیو', 'pinova-plus' ) . '</a>';
+        $links[] = '<a href="https://webinew.com/webdesign-in-mashhad/" target="_blank" style="color:#7c3aed;">' . __( 'طراحی سایت وبینیو', 'pinova-plus' ) . '</a>';
         $links[] = '<a href="https://webinew.com/seo-in-mashhad/" target="_blank" style="color:#7c3aed;">' . __( 'خدمات سئو وبینیو', 'pinova-plus' ) . '</a>';
         $links[] = '<a href="https://github.com/EhsanGhasimi/pinova-plus" target="_blank" style="color:#2563eb;">' . __( 'گیت‌هاب پینوا پلاس', 'pinova-plus' ) . '</a>';
     }

@@ -16,8 +16,16 @@ class Core {
     }
 
     private function __construct() {
-        // خواندن تنظیمات ذخیره شده
-        $this->options = get_option( 'pinova_plus', [] );
+        // خواندن تنظیمات ذخیره شده با اطمینان از خروجی آرایه
+        $raw_options = get_option( 'pinova_plus', [] );
+        if ( is_array( $raw_options ) ) {
+            $this->options = $raw_options;
+        } elseif ( is_string( $raw_options ) && ! empty( $raw_options ) ) {
+            $unserialized = maybe_unserialize( $raw_options );
+            $this->options = is_array( $unserialized ) ? $unserialized : [];
+        } else {
+            $this->options = [];
+        }
 
         // اتصال تب و فیلدهای تنظیمات به پنل تنظیمات پینوا
         $this->init_settings_tab();
@@ -98,8 +106,8 @@ class Core {
                             آژانس دیجیتال مارکتینگ <strong>وبینیو</strong> مجری تخصصی راهکارهای رشد آنلاین، خدمات زیر را با بالاترین کیفیت و ضمانت عملکرد ارائه می‌دهد:
                         </p>
                         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 15px;">
-                            <a href="https://webinew.com/webdesign/" target="_blank" style="background: #fff; border: 1px solid #ddd6fe; border-radius: 8px; padding: 10px 14px; text-decoration: none; color: #4c1d95; font-size: 13px; display: block;">
-                                🌐 <strong>طراحی سایت اختصاصی</strong><br><small style="color: #6b7280;">فروشگاهی، شرکتی و پرسرعت</small>
+                            <a href="https://webinew.com/webdesign-in-mashhad/" target="_blank" style="background: #fff; border: 1px solid #ddd6fe; border-radius: 8px; padding: 10px 14px; text-decoration: none; color: #4c1d95; font-size: 13px; display: block;">
+                                🌐 <strong>طراحی سایت در مشهد (اختصاصی)</strong><br><small style="color: #6b7280;">فروشگاهی، شرکتی و پرسرعت</small>
                             </a>
                             <a href="https://webinew.com/seo-in-mashhad/" target="_blank" style="background: #fff; border: 1px solid #ddd6fe; border-radius: 8px; padding: 10px 14px; text-decoration: none; color: #4c1d95; font-size: 13px; display: block;">
                                 🚀 <strong>خدمات سئو حرفه‌ای (SEO)</strong><br><small style="color: #6b7280;">رسیدن به صفحه اول گوگل</small>
