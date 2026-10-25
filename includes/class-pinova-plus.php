@@ -332,7 +332,7 @@ class Core {
     private function init_sync_guest_orders_on_login(): void {
         $sync_handler = function( int $user_id ) {
             $is_enabled = $this->get_setting( 'enable_sync_guest_orders', '1' );
-            if ( ( $is_enabled !== '1' && $is_enabled !== 'on' ) || ! function_exists( 'wc_get_orders' ) ) {
+            if ( $is_enabled !== '1' && $is_enabled !== 'on' ) {
                 return;
             }
 
@@ -341,71 +341,138 @@ class Core {
                 return;
             }
 
-            // ۱. استفاده از متد داخلی ووکامرس برای انتساب سفارشات بر اساس ایمیل
-            if ( function_exists( 'wc_update_new_customer_past_orders' ) ) {
-                wc_update_new_customer_past_orders( $user_id );
+            // ۱. جمع‌آوری تمامی فرمت‌های ممکن شماره موبایل کاربر
+            $raw_mobiles = [];
+            $raw_mobiles[] = $user->user_login;
+
+            $meta_phone = get_user_meta( $user_id, 'billing_phone', true );
+            if ( ! empty( $meta_phone ) ) {
+                $raw_mobiles[] = (string) $meta_phone;
             }
 
-            // ۲. استخراج شماره موبایل کاربر
-            $raw_mobile = get_user_meta( $user_id, 'billing_phone', true );
-            if ( empty( $raw_mobile ) && class_exists( '\Pinova\Services\UserService' ) ) {
-                $raw_mobile = \Pinova\Services\UserService::get_mobile( $user_id );
-            }
-            if ( empty( $raw_mobile ) ) {
-                $raw_mobile = $user->user_login;
+            if ( class_exists( '\Pinova\Services\UserService' ) ) {
+                $service_phone = \Pinova\Services\UserService::get_mobile( $user_id );
+                if ( ! empty( $service_phone ) ) {
+                    $raw_mobiles[] = (string) $service_phone;
+                }
             }
 
-            $clean_mobile = preg_replace( '/\D/', '', (string) $raw_mobile );
-            $short_mobile = strlen( $clean_mobile ) >= 10 ? substr( $clean_mobile, -10 ) : '';
+            $last10 = '';
+            foreach ( $raw_mobiles as $candidate ) {
+                $digits = preg_replace( '/\D/', '', $candidate );
+                if ( strlen( $digits ) >= 10 ) {
+                    $last10 = substr( $digits, -10 );
+                    break;
+                }
+            }
+
+            // فرمت‌های رایج شماره: 09159677791، 989159677791، +989159677791، 9159677791
+            $phone_formats = [];
+            if ( ! empty( $last10 ) ) {
+                $phone_formats[] = '0' . $last10;
+                $phone_formats[] = '98' . $last10;
+                $phone_formats[] = '+98' . $last10;
+                $phone_formats[] = '+98' . $last10 . '+';
+                $phone_formats[] = '0' . $last10 . '+';
+                $phone_formats[] = $last10;
+
+                // همچنین ثبت billing_phone استاندارد 09xxxxxxxxx برای کاربر اگر ثبت نشده بود
+                if ( empty( $meta_phone ) || ! str_starts_with( $meta_phone, '0' ) ) {
+                    update_user_meta( $user_id, 'billing_phone', '0' . $last10 );
+                }
+            }
+
+            // ۲. جمع‌آوری ایمیل‌های احتمالی کاربر
+            $emails = [];
+            if ( ! empty( $user->user_email ) ) {
+                $emails[] = strtolower( trim( $user->user_email ) );
+            }
+            if ( ! empty( $last10 ) ) {
+                $host = wp_parse_url( home_url(), PHP_URL_HOST );
+                $host = preg_replace( '/^www\./i', '', $host );
+                $emails[] = '0' . $last10 . '@' . $host;
+                $emails[] = '98' . $last10 . '@' . $host;
+                $emails[] = '+98' . $last10 . '@' . $host;
+                $emails[] = $last10 . '@' . $host;
+            }
+            $emails = array_unique( array_filter( $emails ) );
 
             global $wpdb;
             $matched_order_ids = [];
 
-            // اگر شماره موبایل معتبر بود، جستجو در دیتابیس (سازگار با HPOS و جدول سنتی wp_posts)
-            if ( ! empty( $short_mobile ) ) {
-                $hpos_orders_table = $wpdb->prefix . 'wc_orders';
-                $hpos_address_table = $wpdb->prefix . 'wc_order_addresses';
+            // ۳. جستجو در جدول مدرن ووکامرس HPOS (wp_wc_orders و wp_wc_order_addresses)
+            $hpos_orders_table = $wpdb->prefix . 'wc_orders';
+            $hpos_address_table = $wpdb->prefix . 'wc_order_addresses';
+            $is_hpos_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $hpos_orders_table ) ) === $hpos_orders_table;
 
-                // بررسی وجود جداول HPOS در ووکامرس مدرن
-                $is_hpos_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $hpos_orders_table ) ) === $hpos_orders_table;
+            if ( $is_hpos_table_exists ) {
+                $phone_conditions = [];
+                $hpos_params = [];
 
-                if ( $is_hpos_table_exists ) {
-                    // جستجو در HPOS بر اساس تلفن یا ایمیل
-                    $like_phone = '%' . $wpdb->esc_like( $short_mobile );
-                    $hpos_sql = $wpdb->prepare(
-                        "SELECT DISTINCT o.id 
-                        FROM {$hpos_orders_table} o
-                        LEFT JOIN {$hpos_address_table} a ON o.id = a.order_id AND a.address_type = 'billing'
-                        WHERE (o.customer_id = 0 OR o.customer_id IS NULL)
-                        AND (
-                            a.phone LIKE %s 
-                            OR o.billing_email = %s
-                            OR a.email = %s
-                        )
-                        LIMIT 50",
-                        $like_phone,
-                        $user->user_email,
-                        $user->user_email
-                    );
-                    $hpos_ids = $wpdb->get_col( $hpos_sql );
+                if ( ! empty( $last10 ) ) {
+                    $phone_conditions[] = "a.phone LIKE %s";
+                    $hpos_params[] = '%' . $wpdb->esc_like( $last10 ) . '%';
+                }
+
+                if ( ! empty( $emails ) ) {
+                    $email_placeholders = implode( ',', array_fill( 0, count( $emails ), '%s' ) );
+                    $phone_conditions[] = "o.billing_email IN ($email_placeholders)";
+                    foreach ( $emails as $em ) {
+                        $hpos_params[] = $em;
+                    }
+                    $phone_conditions[] = "a.email IN ($email_placeholders)";
+                    foreach ( $emails as $em ) {
+                        $hpos_params[] = $em;
+                    }
+                }
+
+                if ( ! empty( $phone_conditions ) ) {
+                    $where_clause = implode( ' OR ', $phone_conditions );
+                    $hpos_sql = "SELECT DISTINCT o.id 
+                                 FROM {$hpos_orders_table} o
+                                 LEFT JOIN {$hpos_address_table} a ON o.id = a.order_id AND a.address_type = 'billing'
+                                 WHERE (o.customer_id = 0 OR o.customer_id IS NULL OR o.customer_id = '')
+                                 AND ({$where_clause})
+                                 LIMIT 100";
+
+                    $hpos_query = ! empty( $hpos_params ) ? $wpdb->prepare( $hpos_sql, $hpos_params ) : $hpos_sql;
+                    $hpos_ids = $wpdb->get_col( $hpos_query );
                     if ( ! empty( $hpos_ids ) ) {
                         $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $hpos_ids ) );
                     }
                 }
+            }
 
-                // جستجو در ساختار سنتی wp_posts / wp_postmeta
-                $legacy_sql = $wpdb->prepare(
-                    "SELECT DISTINCT p.ID 
-                    FROM {$wpdb->posts} p
-                    INNER JOIN {$wpdb->postmeta} pm_phone ON p.ID = pm_phone.post_id AND pm_phone.meta_key = '_billing_phone'
-                    LEFT JOIN {$wpdb->postmeta} pm_cust ON p.ID = pm_cust.post_id AND pm_cust.meta_key = '_customer_user'
-                    WHERE p.post_type = 'shop_order'
-                    AND (pm_cust.meta_value = '0' OR pm_cust.meta_value IS NULL OR pm_cust.meta_value = '')
-                    AND pm_phone.meta_value LIKE %s
-                    LIMIT 50",
-                    '%' . $wpdb->esc_like( $short_mobile )
-                );
-                $legacy_ids = $wpdb->get_col( $legacy_sql );
+            // ۴. جستجو در جدول سنتی wp_posts / wp_postmeta
+            $legacy_conditions = [];
+            $legacy_params = [];
+
+            if ( ! empty( $last10 ) ) {
+                $legacy_conditions[] = "(pm.meta_key = '_billing_phone' AND pm.meta_value LIKE %s)";
+                $legacy_params[] = '%' . $wpdb->esc_like( $last10 ) . '%';
+            }
+
+            if ( ! empty( $emails ) ) {
+                $email_placeholders = implode( ',', array_fill( 0, count( $emails ), '%s' ) );
+                $legacy_conditions[] = "(pm.meta_key = '_billing_email' AND pm.meta_value IN ($email_placeholders))";
+                foreach ( $emails as $em ) {
+                    $legacy_params[] = $em;
+                }
+            }
+
+            if ( ! empty( $legacy_conditions ) ) {
+                $legacy_where = implode( ' OR ', $legacy_conditions );
+                $legacy_sql = "SELECT DISTINCT p.ID 
+                               FROM {$wpdb->posts} p
+                               INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+                               LEFT JOIN {$wpdb->postmeta} pm_cust ON p.ID = pm_cust.post_id AND pm_cust.meta_key = '_customer_user'
+                               WHERE p.post_type = 'shop_order'
+                               AND (pm_cust.meta_value = '0' OR pm_cust.meta_value IS NULL OR pm_cust.meta_value = '')
+                               AND ({$legacy_where})
+                               LIMIT 100";
+
+                $legacy_query = ! empty( $legacy_params ) ? $wpdb->prepare( $legacy_sql, $legacy_params ) : $legacy_sql;
+                $legacy_ids = $wpdb->get_col( $legacy_query );
                 if ( ! empty( $legacy_ids ) ) {
                     $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $legacy_ids ) );
                 }
@@ -413,15 +480,26 @@ class Core {
 
             $matched_order_ids = array_unique( $matched_order_ids );
 
+            // ۵. اتصال سفارشات تطابق‌یافته به کاربر
             if ( ! empty( $matched_order_ids ) ) {
                 foreach ( $matched_order_ids as $oid ) {
-                    $order = wc_get_order( (int) $oid );
-                    if ( $order && ( (int) $order->get_customer_id() === 0 ) ) {
+                    $order = function_exists( 'wc_get_order' ) ? wc_get_order( (int) $oid ) : null;
+                    if ( $order ) {
                         $order->set_customer_id( $user_id );
-                        // اگر شماره سفارش فاقد آدرس ایمیل مشتری لاگین شده بود، در صورت تمایل به‌روزرسانی یا ذخیره شود
                         $order->save();
+                    } else {
+                        // اتصال مستقیم در دیتابیس در صورت لزوم
+                        if ( $is_hpos_table_exists ) {
+                            $wpdb->update( $hpos_orders_table, [ 'customer_id' => $user_id ], [ 'id' => (int) $oid ] );
+                        }
+                        update_post_meta( (int) $oid, '_customer_user', $user_id );
                     }
                 }
+            }
+
+            // ۶. اجرای متد داخلی ووکامرس برای سینک سفارشات بر اساس ایمیل
+            if ( function_exists( 'wc_update_new_customer_past_orders' ) ) {
+                wc_update_new_customer_past_orders( $user_id );
             }
         };
 
@@ -434,15 +512,24 @@ class Core {
             }
         }, 30, 2 );
 
-        // همگام‌سازی خودکار در هنگام مشاهده صفحه سفارشات در پنل کاربری ووکامرس
+        // اتصال به اجرای صفحات فرانت‌اند و برگه حساب کاربری
         add_action( 'template_redirect', function() use ( $sync_handler ) {
-            if ( is_user_logged_in() && function_exists( 'is_account_page' ) && is_account_page() ) {
+            if ( is_user_logged_in() ) {
                 $user_id = get_current_user_id();
                 if ( $user_id > 0 ) {
                     $sync_handler( $user_id );
                 }
             }
-        }, 20 );
+        }, 5 );
+
+        // همگام‌سازی لحظه‌ای قبل از کوئری و دریافت لیست سفارشات ووکامرس در حساب کاربری
+        add_filter( 'woocommerce_my_account_my_orders_query', function( array $args ) use ( $sync_handler ) {
+            $user_id = get_current_user_id();
+            if ( $user_id > 0 ) {
+                $sync_handler( $user_id );
+            }
+            return $args;
+        }, 1, 1 );
     }
 
     /**

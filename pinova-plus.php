@@ -3,7 +3,7 @@
  * Plugin Name: پینوا پلاس (Pinova Plus)
  * Plugin URI: https://webinew.com
  * Description: افزودنی قدرتمند و تکمیلی برای افزونه ورود و ثبت‌نام پیامکی پینوا (تولید خودکار ایمیل سیستمی استاندارد برای ووکامرس، استثنا کردن صفحه ورود مدیریت و لاگین سفارشی، سینک خودکار سفارشات ثبت شده با شماره موبایل و خدمات پشتیبانی تخصصی وبینیو).
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: احسان قسیمی (Ehsan Ghasimi) - وبینیو (Webinew)
  * Author URI: https://webinew.com
  * License: GPLv2 or later
@@ -12,7 +12,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'PINOVA_PLUS_VERSION', '1.0.3' );
+define( 'PINOVA_PLUS_VERSION', '1.0.4' );
 define( 'PINOVA_PLUS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PINOVA_PLUS_URL', plugin_dir_url( __FILE__ ) );
 define( 'PINOVA_PLUS_FILE', __FILE__ );
