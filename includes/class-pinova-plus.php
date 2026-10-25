@@ -341,7 +341,7 @@ class Core {
                 return;
             }
 
-            // ۱. جمع‌آوری تمامی فرمت‌های ممکن شماره موبایل کاربر
+            // ۱. جمع‌آوری شماره موبایل کاربر و استخراج ۱۰ رقم پایانی (مثل 9159677791)
             $raw_mobiles = [];
             $raw_mobiles[] = $user->user_login;
 
@@ -366,138 +366,122 @@ class Core {
                 }
             }
 
-            // فرمت‌های رایج شماره: 09159677791، 989159677791، +989159677791، 9159677791
-            $phone_formats = [];
-            if ( ! empty( $last10 ) ) {
-                $phone_formats[] = '0' . $last10;
-                $phone_formats[] = '98' . $last10;
-                $phone_formats[] = '+98' . $last10;
-                $phone_formats[] = '+98' . $last10 . '+';
-                $phone_formats[] = '0' . $last10 . '+';
-                $phone_formats[] = $last10;
-
-                // همچنین ثبت billing_phone استاندارد 09xxxxxxxxx برای کاربر اگر ثبت نشده بود
-                if ( empty( $meta_phone ) || ! str_starts_with( $meta_phone, '0' ) ) {
-                    update_user_meta( $user_id, 'billing_phone', '0' . $last10 );
-                }
+            if ( empty( $last10 ) ) {
+                return;
             }
 
-            // ۲. جمع‌آوری ایمیل‌های احتمالی کاربر
-            $emails = [];
-            if ( ! empty( $user->user_email ) ) {
-                $emails[] = strtolower( trim( $user->user_email ) );
+            // بروزرسانی شماره تلفن حساب کاربر به فرمت تمیز
+            if ( empty( $meta_phone ) || ! str_starts_with( $meta_phone, '0' ) ) {
+                update_user_meta( $user_id, 'billing_phone', '0' . $last10 );
             }
-            if ( ! empty( $last10 ) ) {
-                $host = wp_parse_url( home_url(), PHP_URL_HOST );
-                $host = preg_replace( '/^www\./i', '', $host );
-                $emails[] = '0' . $last10 . '@' . $host;
-                $emails[] = '98' . $last10 . '@' . $host;
-                $emails[] = '+98' . $last10 . '@' . $host;
-                $emails[] = $last10 . '@' . $host;
-            }
-            $emails = array_unique( array_filter( $emails ) );
 
             global $wpdb;
-            $matched_order_ids = [];
 
-            // ۳. جستجو در جدول مدرن ووکامرس HPOS (wp_wc_orders و wp_wc_order_addresses)
+            // ۲. شناسایی اکانت‌های تکراری احتمالی که با همین شماره موبایل ساخته شده‌اند (مثلا 0915... و 98915... و +98915...)
+            $sibling_user_ids = $wpdb->get_col( $wpdb->prepare(
+                "SELECT ID FROM {$wpdb->users} WHERE user_login LIKE %s",
+                '%' . $wpdb->esc_like( $last10 )
+            ) );
+            $target_user_ids = array_unique( array_filter( array_map( 'intval', (array) $sibling_user_ids ) ) );
+            if ( ! in_array( $user_id, $target_user_ids, true ) ) {
+                $target_user_ids[] = $user_id;
+            }
+
+            // شرط customer_id: سفارشاتی که هنوز مهمان هستند (0 یا خالی) یا به یکی از اکانت‌های تکراری همین شماره منتسب شده‌اند
+            $id_placeholders = implode( ',', array_fill( 0, count( $target_user_ids ), '%d' ) );
+
+            // ۳. جمع‌آوری الگوهای ایمیل مرتبط با این شماره
+            $host = wp_parse_url( home_url(), PHP_URL_HOST );
+            $host = preg_replace( '/^www\./i', '', $host );
+
+            $matched_order_ids = [];
+            $esc_phone_like = '%' . $wpdb->esc_like( $last10 );
+            $esc_email_like = '%' . $wpdb->esc_like( $last10 ) . '%';
+
+            // ۴. جستجو در جدول مدرن HPOS ووکامرس (wp_wc_orders و wp_wc_order_addresses)
             $hpos_orders_table = $wpdb->prefix . 'wc_orders';
             $hpos_address_table = $wpdb->prefix . 'wc_order_addresses';
-            $is_hpos_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $hpos_orders_table ) ) === $hpos_orders_table;
+            $is_hpos = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $hpos_orders_table ) ) === $hpos_orders_table;
 
-            if ( $is_hpos_table_exists ) {
-                $phone_conditions = [];
-                $hpos_params = [];
+            if ( $is_hpos ) {
+                $hpos_sql = "SELECT DISTINCT o.id 
+                             FROM {$hpos_orders_table} o
+                             LEFT JOIN {$hpos_address_table} a ON o.id = a.order_id AND a.address_type = 'billing'
+                             WHERE (o.customer_id = 0 OR o.customer_id IS NULL OR o.customer_id IN ($id_placeholders))
+                             AND (
+                                 a.phone LIKE %s
+                                 OR o.billing_email LIKE %s
+                                 OR a.email LIKE %s
+                             )
+                             LIMIT 100";
 
-                if ( ! empty( $last10 ) ) {
-                    $phone_conditions[] = "a.phone LIKE %s";
-                    $hpos_params[] = '%' . $wpdb->esc_like( $last10 ) . '%';
-                }
-
-                if ( ! empty( $emails ) ) {
-                    $email_placeholders = implode( ',', array_fill( 0, count( $emails ), '%s' ) );
-                    $phone_conditions[] = "o.billing_email IN ($email_placeholders)";
-                    foreach ( $emails as $em ) {
-                        $hpos_params[] = $em;
-                    }
-                    $phone_conditions[] = "a.email IN ($email_placeholders)";
-                    foreach ( $emails as $em ) {
-                        $hpos_params[] = $em;
-                    }
-                }
-
-                if ( ! empty( $phone_conditions ) ) {
-                    $where_clause = implode( ' OR ', $phone_conditions );
-                    $hpos_sql = "SELECT DISTINCT o.id 
-                                 FROM {$hpos_orders_table} o
-                                 LEFT JOIN {$hpos_address_table} a ON o.id = a.order_id AND a.address_type = 'billing'
-                                 WHERE (o.customer_id = 0 OR o.customer_id IS NULL OR o.customer_id = '')
-                                 AND ({$where_clause})
-                                 LIMIT 100";
-
-                    $hpos_query = ! empty( $hpos_params ) ? $wpdb->prepare( $hpos_sql, $hpos_params ) : $hpos_sql;
-                    $hpos_ids = $wpdb->get_col( $hpos_query );
-                    if ( ! empty( $hpos_ids ) ) {
-                        $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $hpos_ids ) );
-                    }
+                $hpos_params = array_merge( $target_user_ids, [ $esc_phone_like, $esc_email_like, $esc_email_like ] );
+                $hpos_ids = $wpdb->get_col( $wpdb->prepare( $hpos_sql, ...$hpos_params ) );
+                if ( ! empty( $hpos_ids ) ) {
+                    $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $hpos_ids ) );
                 }
             }
 
-            // ۴. جستجو در جدول سنتی wp_posts / wp_postmeta
-            $legacy_conditions = [];
-            $legacy_params = [];
+            // ۵. جستجو در جدول سنتی پست‌های وردپرس (wp_posts و wp_postmeta)
+            $legacy_sql = "SELECT DISTINCT p.ID 
+                           FROM {$wpdb->posts} p
+                           INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+                           LEFT JOIN {$wpdb->postmeta} pm_cust ON p.ID = pm_cust.post_id AND pm_cust.meta_key = '_customer_user'
+                           WHERE p.post_type = 'shop_order'
+                           AND (
+                               pm_cust.meta_value = '0' 
+                               OR pm_cust.meta_value IS NULL 
+                               OR pm_cust.meta_value = '' 
+                               OR pm_cust.meta_value IN ($id_placeholders)
+                           )
+                           AND (
+                               (pm.meta_key = '_billing_phone' AND pm.meta_value LIKE %s)
+                               OR (pm.meta_key = '_billing_email' AND pm.meta_value LIKE %s)
+                           )
+                           LIMIT 100";
 
-            if ( ! empty( $last10 ) ) {
-                $legacy_conditions[] = "(pm.meta_key = '_billing_phone' AND pm.meta_value LIKE %s)";
-                $legacy_params[] = '%' . $wpdb->esc_like( $last10 ) . '%';
-            }
-
-            if ( ! empty( $emails ) ) {
-                $email_placeholders = implode( ',', array_fill( 0, count( $emails ), '%s' ) );
-                $legacy_conditions[] = "(pm.meta_key = '_billing_email' AND pm.meta_value IN ($email_placeholders))";
-                foreach ( $emails as $em ) {
-                    $legacy_params[] = $em;
-                }
-            }
-
-            if ( ! empty( $legacy_conditions ) ) {
-                $legacy_where = implode( ' OR ', $legacy_conditions );
-                $legacy_sql = "SELECT DISTINCT p.ID 
-                               FROM {$wpdb->posts} p
-                               INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
-                               LEFT JOIN {$wpdb->postmeta} pm_cust ON p.ID = pm_cust.post_id AND pm_cust.meta_key = '_customer_user'
-                               WHERE p.post_type = 'shop_order'
-                               AND (pm_cust.meta_value = '0' OR pm_cust.meta_value IS NULL OR pm_cust.meta_value = '')
-                               AND ({$legacy_where})
-                               LIMIT 100";
-
-                $legacy_query = ! empty( $legacy_params ) ? $wpdb->prepare( $legacy_sql, $legacy_params ) : $legacy_sql;
-                $legacy_ids = $wpdb->get_col( $legacy_query );
-                if ( ! empty( $legacy_ids ) ) {
-                    $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $legacy_ids ) );
-                }
+            $legacy_params = array_merge( $target_user_ids, [ $esc_phone_like, $esc_email_like ] );
+            $legacy_ids = $wpdb->get_col( $wpdb->prepare( $legacy_sql, ...$legacy_params ) );
+            if ( ! empty( $legacy_ids ) ) {
+                $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $legacy_ids ) );
             }
 
             $matched_order_ids = array_unique( $matched_order_ids );
 
-            // ۵. اتصال سفارشات تطابق‌یافته به کاربر
+            // ۶. انتساب و سینک سفارشات به این کاربر فعلی
             if ( ! empty( $matched_order_ids ) ) {
                 foreach ( $matched_order_ids as $oid ) {
                     $order = function_exists( 'wc_get_order' ) ? wc_get_order( (int) $oid ) : null;
                     if ( $order ) {
                         $order->set_customer_id( $user_id );
-                        $order->save();
-                    } else {
-                        // اتصال مستقیم در دیتابیس در صورت لزوم
-                        if ( $is_hpos_table_exists ) {
-                            $wpdb->update( $hpos_orders_table, [ 'customer_id' => $user_id ], [ 'id' => (int) $oid ] );
+                        if ( ! empty( $user->user_email ) ) {
+                            $order->set_billing_email( $user->user_email );
                         }
-                        update_post_meta( (int) $oid, '_customer_user', $user_id );
+                        if ( ! $order->get_billing_phone() ) {
+                            $order->set_billing_phone( '0' . $last10 );
+                        }
+                        $order->save();
+                    }
+
+                    // به‌روزرسانی مستقیم دیتابیس برای اطمینان ۱۰۰٪
+                    if ( $is_hpos ) {
+                        $wpdb->update(
+                            $hpos_orders_table,
+                            [ 
+                                'customer_id'   => $user_id,
+                                'billing_email' => $user->user_email ?: ( '0' . $last10 . '@' . $host )
+                            ],
+                            [ 'id' => (int) $oid ]
+                        );
+                    }
+                    update_post_meta( (int) $oid, '_customer_user', $user_id );
+                    if ( ! empty( $user->user_email ) ) {
+                        update_post_meta( (int) $oid, '_billing_email', $user->user_email );
                     }
                 }
             }
 
-            // ۶. اجرای متد داخلی ووکامرس برای سینک سفارشات بر اساس ایمیل
+            // ۷. اجرای متد داخلی ووکامرس برای انتساب سفارشات ایمیل
             if ( function_exists( 'wc_update_new_customer_past_orders' ) ) {
                 wc_update_new_customer_past_orders( $user_id );
             }
@@ -512,7 +496,16 @@ class Core {
             }
         }, 30, 2 );
 
-        // اتصال به اجرای صفحات فرانت‌اند و برگه حساب کاربری
+        // همگام‌سازی بلافاصله با لود برگه حساب کاربری یا هر صفحه سایت
+        add_action( 'init', function() use ( $sync_handler ) {
+            if ( is_user_logged_in() ) {
+                $user_id = get_current_user_id();
+                if ( $user_id > 0 ) {
+                    $sync_handler( $user_id );
+                }
+            }
+        }, 20 );
+
         add_action( 'template_redirect', function() use ( $sync_handler ) {
             if ( is_user_logged_in() ) {
                 $user_id = get_current_user_id();
@@ -522,7 +515,7 @@ class Core {
             }
         }, 5 );
 
-        // همگام‌سازی لحظه‌ای قبل از کوئری و دریافت لیست سفارشات ووکامرس در حساب کاربری
+        // همگام‌سازی لحظه‌ای قبل از اجرای کوئری سفارشات من در ووکامرس
         add_filter( 'woocommerce_my_account_my_orders_query', function( array $args ) use ( $sync_handler ) {
             $user_id = get_current_user_id();
             if ( $user_id > 0 ) {
@@ -582,15 +575,29 @@ class Core {
         $clean_id = is_object( $identifier ) && method_exists( $identifier, 'get_value' ) ? $identifier->get_value() : (string) $identifier;
         $clean_id = sanitize_text_field( $clean_id );
 
-        // یافتن یا ایجاد کاربر در صورت نیاز
-        $user_id = email_exists( $clean_id );
-        if ( ! $user_id ) {
-            $user_id = username_exists( $clean_id );
-        }
-        if ( ! $user_id && class_exists( '\Pinova\Services\UserService' ) && class_exists( '\Pinova\Objects\Identifier' ) ) {
+        // یافتن یا ایجاد کاربر در صورت نیاز - پشتیبانی هوشمند از پسوند ۱۰ رقمی موبایل
+        $user_id = null;
+        if ( class_exists( '\Pinova\Services\UserService' ) ) {
             try {
-                $user_id = \Pinova\Services\UserService::match( new \Pinova\Objects\Identifier( $clean_id ) );
+                $user_id = \Pinova\Services\UserService::get_by_mobile( $clean_id );
             } catch ( \Throwable $e ) {}
+        }
+
+        if ( ! $user_id ) {
+            $user_id = email_exists( $clean_id ) ?: username_exists( $clean_id );
+        }
+
+        // تطبیق بر اساس ۱۰ رقم آخر شماره تلفن در جدول کاربران وردپرس
+        if ( ! $user_id ) {
+            $digits = preg_replace( '/\D/', '', $clean_id );
+            if ( strlen( $digits ) >= 10 ) {
+                $last10 = substr( $digits, -10 );
+                global $wpdb;
+                $user_id = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT ID FROM {$wpdb->users} WHERE user_login LIKE %s ORDER BY ID ASC LIMIT 1",
+                    '%' . $wpdb->esc_like( $last10 )
+                ) );
+            }
         }
 
         $code_len = 4;
@@ -680,11 +687,39 @@ class Core {
         // علامت‌گذاری به عنوان تایید شده
         $wpdb->update( $otp_table, [ 'verified_at' => current_time( 'mysql' ) ], [ 'id' => $otp_row->id ] );
 
-        // یافتن یا ساخت کاربر
+        // یافتن یا ساخت کاربر بر اساس شناسه یا ۱۰ رقم موبایل
         $identifier = $otp_row->identifier;
-        $user = get_user_by( 'login', $identifier );
+        $user = null;
+
+        if ( class_exists( '\Pinova\Services\UserService' ) ) {
+            try {
+                $uid = \Pinova\Services\UserService::get_by_mobile( $identifier );
+                if ( $uid ) {
+                    $user = get_user_by( 'id', $uid );
+                }
+            } catch ( \Throwable $e ) {}
+        }
+
+        if ( ! $user ) {
+            $user = get_user_by( 'login', $identifier );
+        }
         if ( ! $user && is_email( $identifier ) ) {
             $user = get_user_by( 'email', $identifier );
+        }
+
+        // اگر باز هم پیدا نشد، بر اساس ۱۰ رقم پایانی تطبیق بده تا اکانت تکراری ایجاد نشود
+        if ( ! $user ) {
+            $digits = preg_replace( '/\D/', '', $identifier );
+            if ( strlen( $digits ) >= 10 ) {
+                $last10 = substr( $digits, -10 );
+                $matched_uid = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT ID FROM {$wpdb->users} WHERE user_login LIKE %s ORDER BY ID ASC LIMIT 1",
+                    '%' . $wpdb->esc_like( $last10 )
+                ) );
+                if ( $matched_uid > 0 ) {
+                    $user = get_user_by( 'id', $matched_uid );
+                }
+            }
         }
 
         if ( ! $user ) {
