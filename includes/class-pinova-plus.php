@@ -64,7 +64,7 @@ class Core {
                     'label'   => 'استثنا کردن صفحه ورود مدیریت (وبینیو)',
                     'desc'    => 'با فعال‌سازی این گزینه، در آدرس سفارشی لاگین سایت، فرم نام‌کاربری/رمز پیش‌فرض وردپرس باز می‌شود و به پینوا هدایت نمی‌گردد.',
                     'type'    => 'checkbox',
-                    'default' => 'on',
+                    'default' => '1',
                 ],
                 [
                     'id'          => 'custom_login_slugs',
@@ -79,14 +79,14 @@ class Core {
                     'label'   => 'تولید ایمیل سیستمی خودکار برای ووکامرس',
                     'desc'    => 'برای کاربرانی که فقط با شماره موبایل ثبت‌نام می‌کنند، یک ایمیل استاندارد با ساختار شماره@دامنه ساخته می‌شود تا ووکامرس به آنها دسترسی کامل بدهد.',
                     'type'    => 'checkbox',
-                    'default' => 'on',
+                    'default' => '1',
                 ],
                 [
                     'id'      => 'enable_sync_guest_orders',
                     'label'   => 'سینک خودکار سفارشات ثبت شده با شماره موبایل',
                     'desc'    => 'اگر کاربر قبلاً در حالت «ایجاد خودکار بدون احراز هویت» یا مهمان خریدی ثبت کرده باشد، هنگام اولین ورود با موبایل، تمام سفارشات قبلی‌اش خودکار به حساب کاربری او متصل و در داشبوردش نمایش داده می‌شوند.',
                     'type'    => 'checkbox',
-                    'default' => 'on',
+                    'default' => '1',
                 ],
                 [
                     'id'      => 'webinew_services_banner',
@@ -140,7 +140,7 @@ class Core {
             );
         }, 99 );
 
-        // ثبت بخش تنظیمات در لیست مجاز options.php وردپرس
+        // ثبت بخش تنظیمات در لیست مجاز options.php وردپرس با ذخیره‌سازی صحیح 1 و 0
         add_action( 'admin_init', function() {
             register_setting( 'pinova_plus', 'pinova_plus', [
                 'type'              => 'array',
@@ -149,27 +149,58 @@ class Core {
                         return [];
                     }
                     return [
-                        'enable_custom_login_bypass' => isset( $input['enable_custom_login_bypass'] ) && $input['enable_custom_login_bypass'] == '1' ? 'on' : 'off',
+                        'enable_custom_login_bypass' => ( isset( $input['enable_custom_login_bypass'] ) && (string) $input['enable_custom_login_bypass'] === '1' ) ? '1' : '0',
                         'custom_login_slugs'        => sanitize_text_field( $input['custom_login_slugs'] ?? 'w-develop, webinew-login' ),
-                        'enable_auto_fake_email'     => isset( $input['enable_auto_fake_email'] ) && $input['enable_auto_fake_email'] == '1' ? 'on' : 'off',
-                        'enable_sync_guest_orders'   => isset( $input['enable_sync_guest_orders'] ) && $input['enable_sync_guest_orders'] == '1' ? 'on' : 'off',
+                        'enable_auto_fake_email'     => ( isset( $input['enable_auto_fake_email'] ) && (string) $input['enable_auto_fake_email'] === '1' ) ? '1' : '0',
+                        'enable_sync_guest_orders'   => ( isset( $input['enable_sync_guest_orders'] ) && (string) $input['enable_sync_guest_orders'] === '1' ) ? '1' : '0',
                     ];
                 },
             ] );
         } );
 
-        // استایل کمکی برای حذف تاخیر و رفع پرش‌های انیمیشنی چک‌باکس‌ها
+        // استایل کمکی برای حذف تداخل کلیک، حذف پرش، و هماهنگی کامل چک‌باکس‌ها
         add_action( 'admin_head', function() {
             $screen = get_current_screen();
             if ( $screen && str_contains( $screen->id, 'pinova' ) ) {
                 echo '<style>
-                    #pinova_plus .checkbox, .pinova_plus .checkbox {
-                        transition: none !important;
-                        cursor: pointer !important;
+                    #pinova_plus .group, .group {
+                        animation: none !important;
                     }
-                    #pinova_plus label {
+                    #pinova_plus fieldset label {
+                        display: inline-flex !important;
+                        align-items: center !important;
+                        gap: 8px !important;
                         cursor: pointer !important;
-                        user-select: none;
+                        user-select: none !important;
+                    }
+                    #pinova_plus input[type="checkbox"] {
+                        appearance: checkbox !important;
+                        -webkit-appearance: checkbox !important;
+                        width: 18px !important;
+                        height: 18px !important;
+                        min-width: 18px !important;
+                        margin: 0 !important;
+                        display: inline-block !important;
+                        position: relative !important;
+                        opacity: 1 !important;
+                        visibility: visible !important;
+                        cursor: pointer !important;
+                        box-shadow: none !important;
+                        border: 1px solid #c3c4c7 !important;
+                        border-radius: 4px !important;
+                        background: #fff !important;
+                        transition: none !important;
+                    }
+                    #pinova_plus input[type="checkbox"]:checked {
+                        background-color: #2271b1 !important;
+                        border-color: #2271b1 !important;
+                    }
+                    #pinova_plus input[type="checkbox"]:checked::before {
+                        content: url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2020%2020%27%3E%3Cpath%20d%3D%27M14.83%204.89l1.34.94-9.9%2014.13L1.5%2014.5l1.34-1.34%203.74%203.74%208.25-12.01z%27%20fill%3D%27%23fff%27%2F%3E%3C%2Fsvg%3E") !important;
+                        display: block !important;
+                        width: 14px !important;
+                        height: 14px !important;
+                        margin: 1px !important;
                     }
                 </style>';
             }
@@ -181,8 +212,8 @@ class Core {
      */
     private function init_custom_login_bypass(): void {
         add_action( 'init', function() {
-            $is_enabled = $this->get_setting( 'enable_custom_login_bypass', 'on' );
-            if ( $is_enabled !== 'on' ) {
+            $is_enabled = $this->get_setting( 'enable_custom_login_bypass', '1' );
+            if ( $is_enabled !== '1' && $is_enabled !== 'on' ) {
                 return;
             }
 
@@ -219,8 +250,8 @@ class Core {
      * ۲. تولید خودکار ایمیل سیستمی استاندارد برای کاربرانی که بدون ایمیل و فقط با موبایل ثبت‌نام می‌کنند.
      */
     private function init_auto_fake_email(): void {
-        $is_enabled = $this->get_setting( 'enable_auto_fake_email', 'on' );
-        if ( $is_enabled !== 'on' ) {
+        $is_enabled = $this->get_setting( 'enable_auto_fake_email', '1' );
+        if ( $is_enabled !== '1' && $is_enabled !== 'on' ) {
             return;
         }
 
@@ -291,8 +322,8 @@ class Core {
      */
     private function init_sync_guest_orders_on_login(): void {
         $sync_handler = function( int $user_id ) {
-            $is_enabled = $this->get_setting( 'enable_sync_guest_orders', 'on' );
-            if ( $is_enabled !== 'on' || ! function_exists( 'wc_get_orders' ) ) {
+            $is_enabled = $this->get_setting( 'enable_sync_guest_orders', '1' );
+            if ( ( $is_enabled !== '1' && $is_enabled !== 'on' ) || ! function_exists( 'wc_get_orders' ) ) {
                 return;
             }
 
