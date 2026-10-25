@@ -341,7 +341,12 @@ class Core {
                 return;
             }
 
-            // استخراج شماره موبایل کاربر
+            // ۱. استفاده از متد داخلی ووکامرس برای انتساب سفارشات بر اساس ایمیل
+            if ( function_exists( 'wc_update_new_customer_past_orders' ) ) {
+                wc_update_new_customer_past_orders( $user_id );
+            }
+
+            // ۲. استخراج شماره موبایل کاربر
             $raw_mobile = get_user_meta( $user_id, 'billing_phone', true );
             if ( empty( $raw_mobile ) && class_exists( '\Pinova\Services\UserService' ) ) {
                 $raw_mobile = \Pinova\Services\UserService::get_mobile( $user_id );
@@ -350,44 +355,74 @@ class Core {
                 $raw_mobile = $user->user_login;
             }
 
-            $clean_mobile = preg_replace( '/\D/', '', $raw_mobile );
-            if ( strlen( $clean_mobile ) < 10 ) {
-                return;
-            }
-
-            // اجرای بررسی فقط یکبار برای هر کاربر جهت جلوگیری از هرگونه کندی سایت
-            if ( get_user_meta( $user_id, '_pinova_plus_orders_synced', true ) ) {
-                return;
-            }
-
-            // فرمت‌های ۱۰ رقمی شماره موبایل
-            $short_mobile = substr( $clean_mobile, -10 );
+            $clean_mobile = preg_replace( '/\D/', '', (string) $raw_mobile );
+            $short_mobile = strlen( $clean_mobile ) >= 10 ? substr( $clean_mobile, -10 ) : '';
 
             global $wpdb;
-            // کوئری مستقیم، سبک و سریع فقط برای سفارشات با customer_id = 0
-            $matched_order_ids = $wpdb->get_col( $wpdb->prepare(
-                "SELECT DISTINCT p.ID FROM {$wpdb->posts} p
-                INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
-                INNER JOIN {$wpdb->postmeta} pm_customer ON p.ID = pm_customer.post_id
-                WHERE p.post_type = 'shop_order'
-                AND pm_customer.meta_key = '_customer_user' AND pm_customer.meta_value = '0'
-                AND pm.meta_key = '_billing_phone' AND pm.meta_value LIKE %s
-                LIMIT 20",
-                '%' . $wpdb->esc_like( $short_mobile )
-            ) );
+            $matched_order_ids = [];
+
+            // اگر شماره موبایل معتبر بود، جستجو در دیتابیس (سازگار با HPOS و جدول سنتی wp_posts)
+            if ( ! empty( $short_mobile ) ) {
+                $hpos_orders_table = $wpdb->prefix . 'wc_orders';
+                $hpos_address_table = $wpdb->prefix . 'wc_order_addresses';
+
+                // بررسی وجود جداول HPOS در ووکامرس مدرن
+                $is_hpos_table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $hpos_orders_table ) ) === $hpos_orders_table;
+
+                if ( $is_hpos_table_exists ) {
+                    // جستجو در HPOS بر اساس تلفن یا ایمیل
+                    $like_phone = '%' . $wpdb->esc_like( $short_mobile );
+                    $hpos_sql = $wpdb->prepare(
+                        "SELECT DISTINCT o.id 
+                        FROM {$hpos_orders_table} o
+                        LEFT JOIN {$hpos_address_table} a ON o.id = a.order_id AND a.address_type = 'billing'
+                        WHERE (o.customer_id = 0 OR o.customer_id IS NULL)
+                        AND (
+                            a.phone LIKE %s 
+                            OR o.billing_email = %s
+                            OR a.email = %s
+                        )
+                        LIMIT 50",
+                        $like_phone,
+                        $user->user_email,
+                        $user->user_email
+                    );
+                    $hpos_ids = $wpdb->get_col( $hpos_sql );
+                    if ( ! empty( $hpos_ids ) ) {
+                        $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $hpos_ids ) );
+                    }
+                }
+
+                // جستجو در ساختار سنتی wp_posts / wp_postmeta
+                $legacy_sql = $wpdb->prepare(
+                    "SELECT DISTINCT p.ID 
+                    FROM {$wpdb->posts} p
+                    INNER JOIN {$wpdb->postmeta} pm_phone ON p.ID = pm_phone.post_id AND pm_phone.meta_key = '_billing_phone'
+                    LEFT JOIN {$wpdb->postmeta} pm_cust ON p.ID = pm_cust.post_id AND pm_cust.meta_key = '_customer_user'
+                    WHERE p.post_type = 'shop_order'
+                    AND (pm_cust.meta_value = '0' OR pm_cust.meta_value IS NULL OR pm_cust.meta_value = '')
+                    AND pm_phone.meta_value LIKE %s
+                    LIMIT 50",
+                    '%' . $wpdb->esc_like( $short_mobile )
+                );
+                $legacy_ids = $wpdb->get_col( $legacy_sql );
+                if ( ! empty( $legacy_ids ) ) {
+                    $matched_order_ids = array_merge( $matched_order_ids, array_map( 'intval', $legacy_ids ) );
+                }
+            }
+
+            $matched_order_ids = array_unique( $matched_order_ids );
 
             if ( ! empty( $matched_order_ids ) ) {
                 foreach ( $matched_order_ids as $oid ) {
                     $order = wc_get_order( (int) $oid );
-                    if ( $order ) {
+                    if ( $order && ( (int) $order->get_customer_id() === 0 ) ) {
                         $order->set_customer_id( $user_id );
+                        // اگر شماره سفارش فاقد آدرس ایمیل مشتری لاگین شده بود، در صورت تمایل به‌روزرسانی یا ذخیره شود
                         $order->save();
                     }
                 }
             }
-
-            // علامت‌گذاری انجام موفق سینک برای این کاربر تا کوئری تکرار نشود
-            update_user_meta( $user_id, '_pinova_plus_orders_synced', 1 );
         };
 
         // اتصال به رویداد لاگین و عضویت پینوا و ورود استاندارد وردپرس
@@ -398,6 +433,16 @@ class Core {
                 $sync_handler( $user->ID );
             }
         }, 30, 2 );
+
+        // همگام‌سازی خودکار در هنگام مشاهده صفحه سفارشات در پنل کاربری ووکامرس
+        add_action( 'template_redirect', function() use ( $sync_handler ) {
+            if ( is_user_logged_in() && function_exists( 'is_account_page' ) && is_account_page() ) {
+                $user_id = get_current_user_id();
+                if ( $user_id > 0 ) {
+                    $sync_handler( $user_id );
+                }
+            }
+        }, 20 );
     }
 
     /**
