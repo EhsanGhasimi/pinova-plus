@@ -34,6 +34,7 @@ class Core {
         $this->init_custom_login_bypass();
         $this->init_auto_fake_email();
         $this->init_sync_guest_orders_on_login();
+        $this->init_dev_mode();
     }
 
     /**
@@ -87,6 +88,13 @@ class Core {
                     'desc'    => 'اگر کاربر قبلاً در حالت «ایجاد خودکار بدون احراز هویت» یا مهمان خریدی ثبت کرده باشد، هنگام اولین ورود با موبایل، تمام سفارشات قبلی‌اش خودکار به حساب کاربری او متصل و در داشبوردش نمایش داده می‌شوند.',
                     'type'    => 'checkbox',
                     'default' => '1',
+                ],
+                [
+                    'id'      => 'enable_dev_mode',
+                    'label'   => 'حالت توسعه و دیباگ (تست بدون پنل پیامک)',
+                    'desc'    => 'ویژه زمان طراحی و دولوپ سایت! با فعال‌سازی این گزینه نیازی به اتصال پنل پیامک نیست؛ کد تایید به صورت خودکار در صفحه لاگین نمایش داده می‌شود و می‌توانید بدون پیامک لاگین را کامل تست کنید.',
+                    'type'    => 'checkbox',
+                    'default' => '0',
                 ],
                 [
                     'id'      => 'webinew_services_banner',
@@ -153,6 +161,7 @@ class Core {
                         'custom_login_slugs'        => sanitize_text_field( $input['custom_login_slugs'] ?? 'w-develop, webinew-login' ),
                         'enable_auto_fake_email'     => ( isset( $input['enable_auto_fake_email'] ) && (string) $input['enable_auto_fake_email'] === '1' ) ? '1' : '0',
                         'enable_sync_guest_orders'   => ( isset( $input['enable_sync_guest_orders'] ) && (string) $input['enable_sync_guest_orders'] === '1' ) ? '1' : '0',
+                        'enable_dev_mode'            => ( isset( $input['enable_dev_mode'] ) && (string) $input['enable_dev_mode'] === '1' ) ? '1' : '0',
                     ];
                 },
             ] );
@@ -390,4 +399,266 @@ class Core {
             }
         }, 30, 2 );
     }
+
+    /**
+     * ۴. حالت تست و دیباگ (توسعه و تست بدون نیاز به پنل پیامک):
+     *    در صورتی که تیک فعال باشد، ارسال پیامک را کاملاً بای‌پاس کرده و یک کد تایید تستی
+     *    (مثلاً 1234) را در جدول پینوا ثبت و معتبر می‌کند و در پنجره فرانت‌اند نمایش و خودکار پر می‌نماید.
+     */
+    private function init_dev_mode(): void {
+        $is_enabled = $this->get_setting( 'enable_dev_mode', '0' );
+        if ( $is_enabled !== '1' && $is_enabled !== 'on' ) {
+            return;
+        }
+
+        // ۱. رهگیری و بای‌پاس کامل وب‌سرویس پینوا در حالت احراز هویت و ورود OTP
+        add_action( 'rest_api_init', function() {
+            // روت اختصاصی بای‌پاس احراز هویت
+            register_rest_route( 'pinova/user', '/authenticate', [
+                'methods'             => 'POST',
+                'callback'            => [ $this, 'dev_authenticate_handler' ],
+                'permission_callback' => '__return_true',
+            ], true ); // آرگومان چهارم true بازنویسی قطعی روت اصلی پینوا است!
+
+            // روت اختصاصی بای‌پاس تایید کد OTP
+            register_rest_route( 'pinova/user', '/login/otp', [
+                'methods'             => 'POST',
+                'callback'            => [ $this, 'dev_login_otp_handler' ],
+                'permission_callback' => '__return_true',
+            ], true );
+        }, 999 );
+
+        // ۲. نمایش باکس شیک و خودکار کد تایید در فرانت‌اند
+        add_action( 'wp_footer', [ $this, 'render_dev_mode_script' ] );
+        add_action( 'admin_footer', [ $this, 'render_dev_mode_script' ] );
+        add_action( 'login_footer', [ $this, 'render_dev_mode_script' ] );
+    }
+
+    /**
+     * کنترل‌کننده اختصاصی ارسال کد در حالت تست و دیباگ
+     */
+    public function dev_authenticate_handler( \WP_REST_Request $request ) {
+        $identifier = $request->get_param( 'identifier' );
+        if ( empty( $identifier ) ) {
+            return new \WP_REST_Response( [
+                'success' => false,
+                'message' => 'لطفاً شماره تلفن همراه یا ایمیل را وارد کنید.',
+                'data'    => [],
+            ], 200 );
+        }
+
+        $clean_id = is_object( $identifier ) && method_exists( $identifier, 'get_value' ) ? $identifier->get_value() : (string) $identifier;
+        $clean_id = sanitize_text_field( $clean_id );
+
+        // یافتن یا ایجاد کاربر در صورت نیاز
+        $user_id = email_exists( $clean_id );
+        if ( ! $user_id ) {
+            $user_id = username_exists( $clean_id );
+        }
+        if ( ! $user_id && class_exists( '\Pinova\Services\UserService' ) && class_exists( '\Pinova\Objects\Identifier' ) ) {
+            try {
+                $user_id = \Pinova\Services\UserService::match( new \Pinova\Objects\Identifier( $clean_id ) );
+            } catch ( \Throwable $e ) {}
+        }
+
+        $code_len = 4;
+        if ( class_exists( '\Pinova\Services\OTPService' ) ) {
+            $code_len = \Pinova\Services\OTPService::code_length();
+        }
+        $test_code = $code_len == 5 ? '12345' : ( $code_len == 6 ? '123456' : '1234' );
+
+        // ثبت کد در جدول pinova_otp برای سازگاری کامل
+        global $wpdb;
+        $otp_table = $wpdb->prefix . 'pinova_otp';
+        $now = current_time( 'mysql' );
+        $expires = date( 'Y-m-d H:i:s', strtotime( '+5 minutes' ) );
+
+        $wpdb->insert( $otp_table, [
+            'user_id'     => $user_id ?: null,
+            'identifier'  => $clean_id,
+            'code'        => wp_hash_password( $test_code ),
+            'ip_address'  => $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1',
+            'attempts'    => 0,
+            'type'        => $user_id ? 'login' : 'register',
+            'channels'    => json_encode( [ 'sms' => true ] ),
+            'expires_at'  => $expires,
+            'verified_at' => null,
+        ] );
+        $otp_id = $wpdb->insert_id;
+
+        $jwt = '';
+        if ( class_exists( '\Pinova\Helpers\JWT' ) ) {
+            $jwt = \Pinova\Helpers\JWT::encode( [ 'otp_id' => $otp_id ], 300 );
+        }
+
+        return new \WP_REST_Response( [
+            'success' => true,
+            'message' => '⚡ حالت تست و توسعه وبینیو فعال است. کد تایید شبیه‌سازی شد: ' . $test_code,
+            'data'    => [
+                'jwt'          => $jwt,
+                'has_account'  => (bool) $user_id,
+                'has_password' => false,
+                'login_method' => 'otp',
+                'ttl'          => 120,
+                'dev_code'     => $test_code,
+            ],
+        ], 200 );
+    }
+
+    /**
+     * کنترل‌کننده اختصاصی تایید کد و ورود در حالت تست و دیباگ
+     */
+    public function dev_login_otp_handler( \WP_REST_Request $request ) {
+        $jwt  = (string) $request->get_param( 'jwt' );
+        $code = (string) $request->get_param( 'code' );
+
+        global $wpdb;
+        $otp_table = $wpdb->prefix . 'pinova_otp';
+
+        $otp_row = null;
+        if ( ! empty( $jwt ) && class_exists( '\Pinova\Helpers\JWT' ) ) {
+            try {
+                $payload = \Pinova\Helpers\JWT::decode( $jwt );
+                if ( ! empty( $payload['otp_id'] ) ) {
+                    $otp_row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$otp_table} WHERE id = %d", $payload['otp_id'] ) );
+                }
+            } catch ( \Throwable $e ) {}
+        }
+
+        if ( ! $otp_row ) {
+            $otp_row = $wpdb->get_row( "SELECT * FROM {$otp_table} ORDER BY id DESC LIMIT 1" );
+        }
+
+        if ( ! $otp_row ) {
+            return new \WP_REST_Response( [
+                'success' => false,
+                'message' => 'اطلاعات نشست معتبر نیست. لطفاً مجدداً شماره را وارد کنید.',
+            ], 200 );
+        }
+
+        // اعتبارسنجی کد
+        $is_valid = wp_check_password( $code, $otp_row->code ) || in_array( $code, [ '1234', '12345', '123456' ] );
+        if ( ! $is_valid ) {
+            return new \WP_REST_Response( [
+                'success' => false,
+                'message' => 'کد تایید وارد شده اشتباه است.',
+            ], 200 );
+        }
+
+        // علامت‌گذاری به عنوان تایید شده
+        $wpdb->update( $otp_table, [ 'verified_at' => current_time( 'mysql' ) ], [ 'id' => $otp_row->id ] );
+
+        // یافتن یا ساخت کاربر
+        $identifier = $otp_row->identifier;
+        $user = get_user_by( 'login', $identifier );
+        if ( ! $user && is_email( $identifier ) ) {
+            $user = get_user_by( 'email', $identifier );
+        }
+
+        if ( ! $user ) {
+            $random_password = wp_generate_password( 12, false );
+            $user_id = wp_create_user( $identifier, $random_password, '' );
+            if ( is_wp_error( $user_id ) ) {
+                return new \WP_REST_Response( [
+                    'success' => false,
+                    'message' => $user_id->get_error_message(),
+                ], 200 );
+            }
+            $user = get_user_by( 'id', $user_id );
+            do_action( 'pinova/user_registered', $user_id );
+        }
+
+        // لاگین کردن کاربر در وردپرس
+        wp_clear_auth_cookie();
+        wp_set_current_user( $user->ID );
+        wp_set_auth_cookie( $user->ID, true );
+        do_action( 'wp_login', $user->user_login, $user );
+        do_action( 'pinova/user_logged_in', $user->ID );
+
+        $redirect = wp_get_referer() ?: home_url();
+
+        return new \WP_REST_Response( [
+            'success' => true,
+            'message' => 'ورود با موفقیت انجام شد (حالت تست وبینیو).',
+            'data'    => [
+                'redirect' => $redirect,
+            ],
+        ], 200 );
+    }
+
+    /**
+     * اسکریپت فرانت‌اند جهت نمایش کادر کد تایید دولوپ در صفحه
+     */
+    public function render_dev_mode_script(): void {
+        $is_enabled = $this->get_setting( 'enable_dev_mode', '0' );
+        if ( $is_enabled !== '1' && $is_enabled !== 'on' ) {
+            return;
+        }
+
+        $code_len = 4;
+        if ( class_exists( '\Pinova\Services\OTPService' ) ) {
+            $code_len = \Pinova\Services\OTPService::code_length();
+        }
+        $test_code = $code_len == 5 ? '12345' : ( $code_len == 6 ? '123456' : '1234' );
+        ?>
+        <script type="text/javascript">
+            (function() {
+                const defaultTestCode = "<?php echo esc_js( $test_code ); ?>";
+
+                const origFetch = window.fetch;
+                if (origFetch) {
+                    window.fetch = async function(...args) {
+                        const response = await origFetch.apply(this, args);
+                        const url = args[0] || '';
+                        if (typeof url === 'string' && url.indexOf('pinova/user/authenticate') !== -1) {
+                            const clone = response.clone();
+                            clone.json().then(data => {
+                                if (data && data.success) {
+                                    const code = data.data && data.data.dev_code ? data.data.dev_code : defaultTestCode;
+                                    showDevOtpNotification(code);
+                                }
+                            }).catch(() => {});
+                        }
+                        return response;
+                    };
+                }
+
+                function showDevOtpNotification(code) {
+                    let container = document.getElementById('pinova-plus-dev-badge');
+                    if (!container) {
+                        container = document.createElement('div');
+                        container.id = 'pinova-plus-dev-badge';
+                        container.style.cssText = 'position:fixed;bottom:25px;right:25px;z-index:9999999;background:#1e1b4b;color:#fff;padding:16px 20px;border-radius:12px;border:2px solid #818cf8;box-shadow:0 10px 30px rgba(0,0,0,0.4);font-family:tahoma,sans-serif;direction:rtl;max-width:320px;animation:pinovaSlideIn 0.3s ease;';
+                        document.body.appendChild(container);
+                    }
+                    container.innerHTML = `
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+                            <strong style="color:#a5b4fc;font-size:13px;">⚡ حالت تست و دیباگ (وبینیو)</strong>
+                            <button onclick="this.parentElement.parentElement.remove()" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:18px;line-height:1;">&times;</button>
+                        </div>
+                        <p style="margin:0 0 8px 0;font-size:12px;color:#cbd5e1;line-height:1.6;">
+                            پیامک شبیه‌سازی شد! برای ورود از کد تایید زیر استفاده کنید:
+                        </p>
+                        <div style="background:#0f172a;padding:8px 12px;border-radius:8px;text-align:center;font-size:22px;letter-spacing:6px;font-weight:bold;color:#38bdf8;user-select:all;cursor:pointer;" title="کلیک برای کپی" onclick="navigator.clipboard && navigator.clipboard.writeText(this.innerText.trim());">
+                            ${code}
+                        </div>
+                        <div style="font-size:11px;color:#94a3b8;margin-top:6px;text-align:center;">کد معتبر تست: <b>${code}</b> (کلیک کنید کپی شود)</div>
+                    `;
+
+                    // پر کردن خودکار فیلد کد تایید پینوا در صفحه
+                    setTimeout(() => {
+                        const codeInput = document.querySelector('input[autocomplete="one-time-code"], input[pinova-model*="code"]');
+                        if (codeInput) {
+                            codeInput.value = code;
+                            codeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            codeInput.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    }, 400);
+                }
+            })();
+        </script>
+        <?php
+    }
 }
+
+
