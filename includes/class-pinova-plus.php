@@ -136,9 +136,44 @@ class Core {
                 'پینوا پلاس',
                 '⚡ پینوا پلاس',
                 'manage_options',
-                'admin.php?page=pinova&tab=pinova_plus'
+                'admin.php?page=pinova#pinova_plus'
             );
         }, 99 );
+
+        // ثبت بخش تنظیمات در لیست مجاز options.php وردپرس
+        add_action( 'admin_init', function() {
+            register_setting( 'pinova_plus', 'pinova_plus', [
+                'type'              => 'array',
+                'sanitize_callback' => function( $input ) {
+                    if ( ! is_array( $input ) ) {
+                        return [];
+                    }
+                    return [
+                        'enable_custom_login_bypass' => isset( $input['enable_custom_login_bypass'] ) && $input['enable_custom_login_bypass'] == '1' ? 'on' : 'off',
+                        'custom_login_slugs'        => sanitize_text_field( $input['custom_login_slugs'] ?? 'w-develop, webinew-login' ),
+                        'enable_auto_fake_email'     => isset( $input['enable_auto_fake_email'] ) && $input['enable_auto_fake_email'] == '1' ? 'on' : 'off',
+                        'enable_sync_guest_orders'   => isset( $input['enable_sync_guest_orders'] ) && $input['enable_sync_guest_orders'] == '1' ? 'on' : 'off',
+                    ];
+                },
+            ] );
+        } );
+
+        // استایل کمکی برای حذف تاخیر و رفع پرش‌های انیمیشنی چک‌باکس‌ها
+        add_action( 'admin_head', function() {
+            $screen = get_current_screen();
+            if ( $screen && str_contains( $screen->id, 'pinova' ) ) {
+                echo '<style>
+                    #pinova_plus .checkbox, .pinova_plus .checkbox {
+                        transition: none !important;
+                        cursor: pointer !important;
+                    }
+                    #pinova_plus label {
+                        cursor: pointer !important;
+                        user-select: none;
+                    }
+                </style>';
+            }
+        } );
     }
 
     /**
@@ -280,57 +315,39 @@ class Core {
                 return;
             }
 
-            // فرمت‌های رایج شماره موبایل در ایران جهت جستجو (09..., 989..., 9...)
-            $short_mobile = substr( $clean_mobile, -10 ); // 9123456789
-            $possible_numbers = [
-                '0' . $short_mobile,
-                $short_mobile,
-                '98' . $short_mobile,
-                '+98' . $short_mobile,
-            ];
-
-            // همچنین اگر ایمیل کاربر در ووکامرس ثبت شده باشد
-            $user_email = $user->user_email;
-
-            // جستجوی سفارشات ثبت‌شده توسط مهمان (customer_id = 0) با شماره موبایل کاربر
-            $order_ids = wc_get_orders( [
-                'customer_id' => 0,
-                'limit'       => 50,
-                'return'      => 'ids',
-            ] );
-
-            if ( empty( $order_ids ) ) {
+            // اجرای بررسی فقط یکبار برای هر کاربر جهت جلوگیری از هرگونه کندی سایت
+            if ( get_user_meta( $user_id, '_pinova_plus_orders_synced', true ) ) {
                 return;
             }
 
-            foreach ( $order_ids as $order_id ) {
-                $order = wc_get_order( $order_id );
-                if ( ! $order ) {
-                    continue;
-                }
+            // فرمت‌های ۱۰ رقمی شماره موبایل
+            $short_mobile = substr( $clean_mobile, -10 );
 
-                $order_phone = preg_replace( '/\D/', '', $order->get_billing_phone() );
-                $order_email = $order->get_billing_email();
+            global $wpdb;
+            // کوئری مستقیم، سبک و سریع فقط برای سفارشات با customer_id = 0
+            $matched_order_ids = $wpdb->get_col( $wpdb->prepare(
+                "SELECT DISTINCT p.ID FROM {$wpdb->posts} p
+                INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+                INNER JOIN {$wpdb->postmeta} pm_customer ON p.ID = pm_customer.post_id
+                WHERE p.post_type = 'shop_order'
+                AND pm_customer.meta_key = '_customer_user' AND pm_customer.meta_value = '0'
+                AND pm.meta_key = '_billing_phone' AND pm.meta_value LIKE %s
+                LIMIT 20",
+                '%' . $wpdb->esc_like( $short_mobile )
+            ) );
 
-                $match = false;
-                if ( ! empty( $order_phone ) ) {
-                    $order_short = substr( $order_phone, -10 );
-                    if ( $order_short === $short_mobile ) {
-                        $match = true;
+            if ( ! empty( $matched_order_ids ) ) {
+                foreach ( $matched_order_ids as $oid ) {
+                    $order = wc_get_order( (int) $oid );
+                    if ( $order ) {
+                        $order->set_customer_id( $user_id );
+                        $order->save();
                     }
                 }
-
-                // تطبیق کمکی با ایمیل (اگر ایمیل غیر فیک بود)
-                if ( ! $match && ! empty( $user_email ) && ! empty( $order_email ) && strtolower( $user_email ) === strtolower( $order_email ) ) {
-                    $match = true;
-                }
-
-                if ( $match ) {
-                    // متصل کردن سفارش به کاربر
-                    $order->set_customer_id( $user_id );
-                    $order->save();
-                }
             }
+
+            // علامت‌گذاری انجام موفق سینک برای این کاربر تا کوئری تکرار نشود
+            update_user_meta( $user_id, '_pinova_plus_orders_synced', 1 );
         };
 
         // اتصال به رویداد لاگین و عضویت پینوا و ورود استاندارد وردپرس

@@ -24,7 +24,7 @@ require_once PINOVA_PLUS_DIR . 'includes/class-pinova-plus.php';
  * افزودن دکمه «تنظیمات» در لیست افزونه‌های وردپرس (زیر نام پینوا پلاس)
  */
 add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function( array $actions ) {
-    $settings_url = admin_url( 'admin.php?page=pinova&tab=pinova_plus' );
+    $settings_url = admin_url( 'admin.php?page=pinova#pinova_plus' );
     $custom_links = [
         'settings' => sprintf(
             '<a href="%s" style="font-weight: bold; color: #7c3aed;">%s</a>',
